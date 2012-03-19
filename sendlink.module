@@ -1,0 +1,187 @@
+<?php 
+/**
+ * Implementation of hook_menu().
+ *
+ * @return An array of menu items.
+ */
+function sendlink_menu() {
+  $items = array();
+  $items['sendlink/js'] = array(
+    'title' => 'Javascript Choice Form',
+    'page callback' => 'sendlink_choice_js',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+/**
+ * Implementation of hook_form_alter().
+ */
+function sendlink_form_alter(&$form, $form_state, $form_id) {
+if ($node->type == "poll_node_form") {
+if (isset($form_state['choice_count'])) {
+    $choice_count = $form_state['choice_count'];
+  }
+  else {
+    $choice_count = max(2, empty($node->choice) ? 2 : count($node->choice));
+  }
+
+  // Add a wrapper for the choices and more button.
+  $form['choice_wrapper'] = array(
+    '#tree' => FALSE,
+    '#weight' => -4,
+    '#prefix' => '<div class="clear-block" id="sendlink-choice-wrapper">',
+    '#suffix' => '</div>',
+  );
+
+  // Container for just the sendlink choices.
+  $form['choice_wrapper']['choice'] = array(
+    '#prefix' => '<div id="sendlink-choices">',
+    '#suffix' => '</div>',
+    '#theme' => 'sendlink_choices',
+  );
+
+  // Add the current choices to the form.
+  for ($delta = 0; $delta < $choice_count; $delta++) {
+    $text = isset($node->choice[$delta]['chtext']) ? $node->choice[$delta]['chtext'] : '';
+
+    $form['choice_wrapper']['choice'][$delta] = _sendlink_choice_form($delta, $text);
+  }
+
+  // We name our button 'sendlink_more' to avoid conflicts with other modules using
+  // AHAH-enabled buttons with the id 'more'.
+  $form['choice_wrapper']['sendlink_more'] = array(
+    '#type' => 'submit',
+    '#value' => t('More choices'),
+    '#description' => t("If the amount of boxes above isn't enough, click here to add more choices."),
+    '#weight' => 1,
+    '#submit' => array('sendlink_more_choices_submit'), // If no javascript action.
+    '#ahah' => array(
+      'path' => 'sendlink/js',
+      'wrapper' => 'sendlink-choices',
+      'method' => 'replace',
+      'effect' => 'fade',
+    ),
+  );
+}
+}
+
+function sendlink_more_choices_submit($form, &$form_state) {
+  // Set the form to rebuild and run submit handlers.
+  node_form_submit_build_node($form, $form_state);
+
+  // Make the changes we want to the form state.
+  if ($form_state['values']['sendlink_more']) {
+    $n = $_GET['q'] == 'sendlink/js' ? 1 : 5;
+    $form_state['choice_count'] = count($form_state['values']['choice']) + $n;
+  }
+}
+
+function _sendlink_choice_form($delta, $value = '') {
+  $form = array(
+    '#tree' => TRUE,
+  );
+
+  // We'll manually set the #parents property of these fields so that
+  // their values appear in the $form_state['values']['choice'] array.
+  $form['chtext'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Choice @n', array('@n' => ($delta + 1))),
+    '#default_value' => $value,
+    '#parents' => array('choice', $delta, 'chtext'),
+  );
+  return $form;
+}
+
+/**
+ * Menu callback for AHAH additions.
+ */
+function sendlink_choice_js() {
+  include_once 'modules/node/node.pages.inc';
+  $form_state = array('storage' => NULL, 'submitted' => FALSE);
+  $form_build_id = $_POST['form_build_id'];
+  // Get the form from the cache.
+  $form = form_get_cache($form_build_id, $form_state);
+  $args = $form['#parameters'];
+  $form_id = array_shift($args);
+  // We will run some of the submit handlers so we need to disable redirecting.
+  $form['#redirect'] = FALSE;
+  // We need to process the form, prepare for that by setting a few internals
+  // variables.
+  $form['#post'] = $_POST;
+  $form['#programmed'] = FALSE;
+  $form_state['post'] = $_POST;
+  // Build, validate and if possible, submit the form.
+  drupal_process_form($form_id, $form, $form_state);
+  // This call recreates the form relying solely on the form_state that the
+  // drupal_process_form set up.
+  $form = drupal_rebuild_form($form_id, $form_state, $args, $form_build_id);
+  // Render the new output.
+  $choice_form = $form['choice_wrapper']['choice'];
+  unset($choice_form['#prefix'], $choice_form['#suffix']); // Prevent duplicate wrappers.
+  $output = theme('status_messages') . drupal_render($choice_form);
+
+  drupal_json(array('status' => TRUE, 'data' => $output));
+}
+/**
+ * Implementation of hook_nodeapi().
+ *
+ * @param &$node The node the action is being performed on.
+ * @param $op What kind of action is being performed. Possible values: alter, delete, delete revision, insert, load, prepare, prepare translation, print, rss item, search result, presave, update, update index, validate, view
+ * @param $a3
+ * @param $a4
+ */
+function sendlink_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  if($node->type == 'sendlink') {
+    switch ($op) {
+    case 'view':
+    if(arg(2) != NULL) {
+        redirect_from_mail();
+    }
+    break;
+    case 'insert':
+    case 'update':
+          send_mail_submit(); 
+        break;
+    }
+  }
+}
+function send_mail_submit() {
+  $node = node_load(arg(1));
+  $nid = $node->nid;
+  $mail = sendlink_submit_handler();
+  print dsm($mail);
+  $token = private_question_rehash();
+  $url = url("node/$node->nid/$token" , array('absolute' => TRUE));
+  db_query("INSERT INTO {sendlink} (tnid,token,status) VALUES ('%d','%s', %d)",$nid,$token , 0);
+  $message = array(
+        'to' => $mail,
+        'subject' => t('one time sendlinking link'),
+        'body' => $url,
+        'headers' => array('From' => 'noreply@sfd.com'),
+    );
+    drupal_mail_send($message);
+    drupal_set_message(t("Email has been sent.") , 'status');
+}
+function private_question_rehash() {
+  return md5(rand(5, 15));
+} 
+function redirect_from_mail () {
+$token_url = arg(2);
+$tnid = arg(1); 
+$nid = db_query("select tnid ,token , status from {sendlink} where tnid=%d AND status=%d AND token='%s'",$tnid,0,$token_url);
+while ($result = db_fetch_array($nid)) {
+  $tokens = $result['token'];
+  $status=$result['status'];
+  $node_id=$result['tnid'];
+}
+//$tokens[] = $nid->token;
+if ($token_url == $tokens && $status==0){
+drupal_set_message('you can add pol');
+$update= db_query("update {sendlink} set status=1 where tnid=%d",$node_id);
+}
+else {
+drupal_access_denied();
+}
+}
